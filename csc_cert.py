@@ -18,6 +18,7 @@ import json
 import os
 import platform
 import re
+import webbrowser
 import shutil
 import subprocess
 import sys
@@ -287,29 +288,8 @@ def create_payload(fingerprint: str, username: str) -> str:
 
 def open_browser(url: str) -> bool:
     """Open URL in default browser. Returns success status."""
-    system = platform.system()
     try:
-        if system == 'Linux':
-            subprocess.Popen(
-                ['xdg-open', url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        elif system == 'Darwin':
-            subprocess.Popen(
-                ['open', url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        elif system == 'Windows':
-            subprocess.Popen(
-                ['rundll32', 'url.dll,FileProtocolHandler', url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        else:
-            return False
-        return True
+        return webbrowser.open(url)
     except Exception:
         return False
 
