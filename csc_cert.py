@@ -447,7 +447,7 @@ def add_key_to_pageant(pageant_path: str, ppk_path: Path) -> bool:
     return result.returncode == 0
 
 
-def handle_windows_agents(config: Config) -> None:
+def handle_windows_agents(config: Config, has_private_key: bool = True) -> None:
     """
     Handle Pageant integration on Windows.
 
@@ -461,6 +461,9 @@ def handle_windows_agents(config: Config) -> None:
         if config.is_ppk:
             raise RuntimeError("WinSCP is required for PPK key flow but was not found")
         log_warning("WinSCP not found, skipping PPK creation", config)
+        return
+
+    if not config.is_ppk and not has_private_key:
         return
 
     # For PPK input, WinSCP takes the PPK itself; for OpenSSH input, the private key
@@ -685,8 +688,12 @@ def download_signed_certificate(config: Config) -> None:
     if config.public_key_path.suffix not in ('.pub', '.ppk'):
         raise ValueError("Key path must end in .pub or .ppk")
 
-    if not config.is_ppk and not config.private_key_path.exists():
-        raise FileNotFoundError(f"Private key not found: {config.private_key_path}")
+    has_private_key = config.private_key_path.exists()
+    if not config.is_ppk and not has_private_key:
+        if platform.system() == 'Windows':
+            log("Private key not found — ssh-agent and PPK creation disabled", config)
+        else:
+            log("Private key not found — ssh-agent disabled", config)
 
     # Display paths
     label = "PPK key" if config.is_ppk else "Public key to sign"
@@ -758,7 +765,7 @@ def download_signed_certificate(config: Config) -> None:
         log(f"Certificate written: {config.cert_path}", config)
 
     # Add to ssh-agent (skip for PPK — no OpenSSH private key available)
-    if not config.is_ppk and config.agent_mode not in ('pageant', 'none'):
+    if has_private_key and not config.is_ppk and config.agent_mode not in ('pageant', 'none'):
         if is_ssh_agent_running():
             log(f"Adding private key to ssh-agent: {config.private_key_path}", config, verbose_only=True)
             if add_key_to_ssh_agent(config.private_key_path):
@@ -769,7 +776,7 @@ def download_signed_certificate(config: Config) -> None:
             log_warning("ssh-agent not running, key not added", config)
 
     # Handle Windows agents (Pageant)
-    handle_windows_agents(config)
+    handle_windows_agents(config, has_private_key)
 
     # Clean up -cert.pub for PPK flow (only the -cert.ppk is needed)
     if config.is_ppk and config.cert_path.exists():
