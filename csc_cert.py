@@ -664,21 +664,19 @@ def show_status(key_path: Optional[Path] = None) -> None:
 # Main workflow steps
 # =============================================================================
 
-def resolve_key_info(config: Config) -> Tuple[str, CertificateInfo]:
-    """
-    Resolve fingerprint and existing certificate status.
+def check_existing_certificate(config: Config) -> CertificateInfo:
+    """Check status of the existing certificate, if any."""
+    if config.is_ppk:
+        return check_ppk_certificate_validity(config.ppk_path)
+    return check_certificate_validity(config.cert_path)
 
-    Handles both PPK and OpenSSH key formats.
-    Returns (fingerprint, existing_cert_info).
-    """
+
+def compute_key_fingerprint(config: Config) -> str:
+    """Compute the SHA-256 fingerprint of the input key."""
     if config.is_ppk:
         key_bytes = parse_ppk_public_key(config.public_key_path)
-        fingerprint = compute_fingerprint_from_bytes(key_bytes)
-        cert_info = check_ppk_certificate_validity(config.ppk_path)
-    else:
-        fingerprint = compute_fingerprint(config.public_key_path)
-        cert_info = check_certificate_validity(config.cert_path)
-    return fingerprint, cert_info
+        return compute_fingerprint_from_bytes(key_bytes)
+    return compute_fingerprint(config.public_key_path)
 
 
 def log_key_info(config: Config) -> None:
@@ -865,6 +863,9 @@ Examples:
     else:
         public_key_path = find_default_public_key()
 
+    if is_windows and getattr(args, 'no_ppk', False) and public_key_path.suffix == '.ppk':
+        parser.error("--no-ppk cannot be used with a .ppk input key")
+
     config = Config(
         username=args.username,
         public_key_path=public_key_path,
@@ -891,7 +892,7 @@ def main() -> int:
             raise ValueError("Key path must end in .pub or .ppk")
 
         log_key_info(config)
-        fingerprint, cert_info = resolve_key_info(config)
+        cert_info = check_existing_certificate(config)
 
         if cert_info.error:
             log_warning(f"Could not check existing certificate: {cert_info.error}", config)
@@ -901,6 +902,7 @@ def main() -> int:
         elif cert_info.is_valid and config.refresh:
             log(f"Certificate {_format_cert_status(cert_info)}, refreshing anyway", config)
 
+        fingerprint = compute_key_fingerprint(config)
         cert_data = authenticate_and_download(config, fingerprint)
         write_certificate(config, cert_data)
         maybe_add_to_ssh_agent(config)
