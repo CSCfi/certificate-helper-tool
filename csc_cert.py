@@ -830,7 +830,7 @@ Examples:
         parser.add_argument('-a', '--agent', default='both',
                             choices=['both', 'pageant', 'ssh', 'none'],
                             help="Agent mode (default: both)")
-        parser.add_argument('-P', '--no-ppk', action='store_true',
+        parser.add_argument('-p', '--no-ppk', action='store_true',
                             help="Skip PPK file creation (Windows only)")
     else:
         parser.add_argument('-a', '--agent', default='ssh',

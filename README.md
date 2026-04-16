@@ -108,7 +108,7 @@ certificates. WinSCP's `/keygen` command is required.
 
 ### Skipping PPK Creation
 
-Use `-P` / `--no-ppk` to skip PPK file creation when starting from an
+Use `-p` / `--no-ppk` to skip PPK file creation when starting from an
 OpenSSH public key. Useful if WinSCP is not installed or PPK output is
 not needed. This option is not valid with `.ppk` input.
 
