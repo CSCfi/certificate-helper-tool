@@ -344,6 +344,46 @@ def is_ssh_agent_running() -> bool:
         return False
 
 
+def is_key_in_ssh_agent(private_key_path: Path) -> bool:
+    """
+    Check if private key is already in ssh-agent.
+    """
+    env = os.environ.copy()
+
+    # Get fingerprint of the key
+    result = subprocess.run(
+        ['ssh-keygen', '-lf', str(private_key_path)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    # Something failed, maybe wrong path?
+    if result.returncode != 0:
+        return False
+
+    # ssh-keygen output format:
+    # "<bits> <fingerprint> <comment>"
+    fingerprint = result.stdout.split()[1]
+
+    # List keys currently in the agent
+    agent_keys = subprocess.run(
+        ['ssh-add', '-l'],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    # Agent has no keys
+    if agent_keys.returncode != 0:
+        return False
+
+    # Check if agent has the key fingerprint
+    return fingerprint in agent_keys.stdout
+
+
 def add_key_to_ssh_agent(private_key_path: Path) -> bool:
     """
     Add private key to ssh-agent.
@@ -752,6 +792,10 @@ def maybe_add_to_ssh_agent(config: Config) -> None:
 
     if not is_ssh_agent_running():
         log_warning("ssh-agent not running, key not added", config)
+        return
+
+    if is_key_in_ssh_agent(config.private_key_path):
+        log(f"Not adding private key; ssh-agent already has it: {config.private_key_path}", config, verbose_only=True)
         return
 
     log(f"Adding private key to ssh-agent: {config.private_key_path}", config, verbose_only=True)
