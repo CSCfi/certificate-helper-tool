@@ -54,6 +54,7 @@ class Config:
     silent: bool
     verbose: bool
     refresh: bool
+    create_ppk: bool = True
 
     @property
     def is_ppk(self) -> bool:
@@ -447,13 +448,15 @@ def add_key_to_pageant(pageant_path: str, ppk_path: Path) -> bool:
     return result.returncode == 0
 
 
-def handle_windows_agents(config: Config) -> None:
+def create_cert_ppk(config: Config) -> None:
     """
-    Handle Pageant integration on Windows.
+    Create a PPK file with embedded certificate using WinSCP.
 
-    All errors are non-fatal (graceful degradation).
+    Skipped on non-Windows, when --no-ppk is set, or when private key is missing
+    (for .pub input). For PPK input flow, WinSCP is required and failure raises.
+    For .pub input flow, failure is non-fatal (graceful degradation).
     """
-    if platform.system() != 'Windows':
+    if platform.system() != 'Windows' or not config.create_ppk:
         return
 
     winscp_path = find_winscp()
@@ -463,6 +466,9 @@ def handle_windows_agents(config: Config) -> None:
         log_warning("WinSCP not found, skipping PPK creation", config)
         return
 
+    if not config.is_ppk and not config.private_key_path.exists():
+        return
+
     # For PPK input, WinSCP takes the PPK itself; for OpenSSH input, the private key
     keygen_input = config.public_key_path if config.is_ppk else config.private_key_path
     if not create_ppk(winscp_path, keygen_input, config.cert_path, config.ppk_path):
@@ -470,24 +476,6 @@ def handle_windows_agents(config: Config) -> None:
         return
 
     log(f"Certificate written: {config.ppk_path}", config)
-
-    # Only load into Pageant if agent mode includes it
-    if config.agent_mode in ('ssh', 'none'):
-        return
-
-    if not is_pageant_running():
-        log_warning("Pageant not running, skipping key addition", config)
-        return
-
-    pageant_path = find_pageant()
-    if not pageant_path:
-        log_warning("Pageant not found, skipping key addition", config)
-        return
-
-    if not add_key_to_pageant(pageant_path, config.ppk_path):
-        log_warning("Failed to add key to Pageant", config)
-    else:
-        log("Certificate added to Pageant", config)
 
 
 # =============================================================================
@@ -673,67 +661,54 @@ def show_status(key_path: Optional[Path] = None) -> None:
 
 
 # =============================================================================
-# Main workflow
+# Main workflow steps
 # =============================================================================
 
-def download_signed_certificate(config: Config) -> None:
-    """Main workflow for downloading and installing a signed certificate."""
-
-    # Validate inputs
-    validate_username(config.username)
-
-    if config.public_key_path.suffix not in ('.pub', '.ppk'):
-        raise ValueError("Key path must end in .pub or .ppk")
-
-    if not config.is_ppk and not config.private_key_path.exists():
-        raise FileNotFoundError(f"Private key not found: {config.private_key_path}")
-
-    # Display paths
-    label = "PPK key" if config.is_ppk else "Public key to sign"
-    log(f"{label}: {config.public_key_path}", config)
+def check_existing_certificate(config: Config) -> CertificateInfo:
+    """Check status of the existing certificate, if any."""
     if config.is_ppk:
-        log(f"Certificate PPK: {config.ppk_path}", config)
-    else:
-        log(f"Certificate: {config.cert_path}", config)
+        return check_ppk_certificate_validity(config.ppk_path)
+    return check_certificate_validity(config.cert_path)
 
-    # Check existing certificate validity
-    if config.is_ppk:
-        cert_info = check_ppk_certificate_validity(config.ppk_path)
-    else:
-        cert_info = check_certificate_validity(config.cert_path)
 
-    if cert_info.error:
-        log_warning(f"Could not check existing certificate: {cert_info.error}", config)
-    elif cert_info.is_valid and not config.refresh:
-        log(f"Certificate {_format_cert_status(cert_info)}", config)
-        return
-    elif cert_info.is_valid and config.refresh:
-        log(f"Certificate {_format_cert_status(cert_info)}, refreshing anyway", config)
-
-    # Compute fingerprint and create payload
+def compute_key_fingerprint(config: Config) -> str:
+    """Compute the SHA-256 fingerprint of the input key."""
     if config.is_ppk:
         key_bytes = parse_ppk_public_key(config.public_key_path)
-        fingerprint = compute_fingerprint_from_bytes(key_bytes)
-    else:
-        fingerprint = compute_fingerprint(config.public_key_path)
-    payload = create_payload(fingerprint, config.username)
+        return compute_fingerprint_from_bytes(key_bytes)
+    return compute_fingerprint(config.public_key_path)
 
-    # Generate login URL
+
+def log_key_info(config: Config) -> None:
+    """Log key paths and warn about features disabled by missing private key."""
+    if not config.is_ppk and not config.private_key_path.exists():
+        disabled = "ssh-agent and PPK creation" if platform.system() == 'Windows' else "ssh-agent"
+        log(f"Private key not found — {disabled} disabled", config)
+
+    label = "PPK key" if config.is_ppk else "Public key to sign"
+    log(f"{label}: {config.public_key_path}", config)
+    target_path = config.ppk_path if config.is_ppk else config.cert_path
+    target_label = "Certificate PPK" if config.is_ppk else "Certificate"
+    log(f"{target_label}: {target_path}", config)
+
+
+def authenticate_and_download(config: Config, fingerprint: str) -> str:
+    """
+    Browser auth flow + certificate download.
+
+    Returns the certificate data string.
+    """
+    payload = create_payload(fingerprint, config.username)
     login_url = f"{BASE_URL}/login?certSign={payload}&sshCli=true"
 
-    # Display URL
     print("Please log in to sign the public key:", file=sys.stderr)
     print(file=sys.stderr)
     print(login_url, file=sys.stderr)
     print(file=sys.stderr)
 
-    # Open browser (ignore failures)
     open_browser(login_url)
-
-    # Prompt for code
     code = prompt_for_code()
 
-    # Download certificate
     download_url = f"{BASE_URL}/api/certificate/download/{payload}?code={code}"
     response = download_certificate(download_url)
 
@@ -746,10 +721,14 @@ def download_signed_certificate(config: Config) -> None:
             " 3. You entered an incorrect 6-digit code after logging in. Please run this script again to retry."
         )
 
-    # Save certificate (use write_bytes to avoid line ending conversion on Windows)
-    config.cert_path.write_bytes(response['data'].encode('utf-8'))
+    return response['data']
+
+
+def write_certificate(config: Config, cert_data: str) -> None:
+    """Write the OpenSSH certificate file and log its status."""
+    config.cert_path.write_bytes(cert_data.encode('utf-8'))
     config.cert_path.chmod(0o600)
-    # Display new expiry
+
     new_cert_info = check_certificate_validity(config.cert_path)
     if new_cert_info.expiry:
         log(f"Certificate signed, {_format_cert_status(new_cert_info)}", config)
@@ -757,21 +736,59 @@ def download_signed_certificate(config: Config) -> None:
     if not config.is_ppk:
         log(f"Certificate written: {config.cert_path}", config)
 
-    # Add to ssh-agent (skip for PPK — no OpenSSH private key available)
-    if not config.is_ppk and config.agent_mode not in ('pageant', 'none'):
-        if is_ssh_agent_running():
-            log(f"Adding private key to ssh-agent: {config.private_key_path}", config, verbose_only=True)
-            if add_key_to_ssh_agent(config.private_key_path):
-                log("Certificate added to ssh-agent", config)
-            else:
-                raise RuntimeError("Failed to add private key to ssh-agent")
-        else:
-            log_warning("ssh-agent not running, key not added", config)
 
-    # Handle Windows agents (Pageant)
-    handle_windows_agents(config)
+def maybe_add_to_ssh_agent(config: Config) -> None:
+    """
+    Add private key + certificate to ssh-agent if applicable.
 
-    # Clean up -cert.pub for PPK flow (only the -cert.ppk is needed)
+    Skipped for PPK input (no OpenSSH private key), when private key is
+    missing, or when agent mode excludes ssh-agent.
+    """
+    if config.is_ppk or config.agent_mode in ('pageant', 'none'):
+        return
+    if not config.private_key_path.exists():
+        return
+
+    if not is_ssh_agent_running():
+        log_warning("ssh-agent not running, key not added", config)
+        return
+
+    log(f"Adding private key to ssh-agent: {config.private_key_path}", config, verbose_only=True)
+    if add_key_to_ssh_agent(config.private_key_path):
+        log("Certificate added to ssh-agent", config)
+    else:
+        raise RuntimeError("Failed to add private key to ssh-agent")
+
+
+def maybe_load_into_pageant(config: Config) -> None:
+    """
+    Add the cert-embedded PPK to a running Pageant instance.
+
+    Skipped when agent mode excludes Pageant or PPK file doesn't exist.
+    Non-fatal: logs warnings on failure instead of raising.
+    """
+    if config.agent_mode in ('ssh', 'none'):
+        return
+    if not config.ppk_path.exists():
+        return
+
+    if not is_pageant_running():
+        log_warning("Pageant not running, skipping key addition", config)
+        return
+
+    pageant_path = find_pageant()
+    if not pageant_path:
+        log_warning("Pageant not found, skipping key addition", config)
+        return
+
+    if not add_key_to_pageant(pageant_path, config.ppk_path):
+        log_warning("Failed to add key to Pageant", config)
+    else:
+        log("Certificate added to Pageant", config)
+
+
+def cleanup_intermediate_cert(config: Config) -> None:
+    """Remove the intermediate -cert.pub for PPK input flow (only -cert.ppk is needed)."""
     if config.is_ppk and config.cert_path.exists():
         config.cert_path.unlink()
 
@@ -813,6 +830,8 @@ Examples:
         parser.add_argument('-a', '--agent', default='both',
                             choices=['both', 'pageant', 'ssh', 'none'],
                             help="Agent mode (default: both)")
+        parser.add_argument('-p', '--no-ppk', action='store_true',
+                            help="Skip PPK file creation (Windows only)")
     else:
         parser.add_argument('-a', '--agent', default='ssh',
                             choices=['ssh', 'none'],
@@ -844,6 +863,9 @@ Examples:
     else:
         public_key_path = find_default_public_key()
 
+    if is_windows and getattr(args, 'no_ppk', False) and public_key_path.suffix == '.ppk':
+        parser.error("--no-ppk cannot be used with a .ppk input key")
+
     config = Config(
         username=args.username,
         public_key_path=public_key_path,
@@ -851,12 +873,13 @@ Examples:
         silent=args.silent,
         verbose=args.verbose,
         refresh=args.refresh,
+        create_ppk=not getattr(args, 'no_ppk', False),
     )
     return config, False
 
 
 def main() -> int:
-    """Entry point."""
+    """Entry point — orchestrates the full certificate signing workflow."""
     try:
         config, status_mode = parse_args()
 
@@ -864,7 +887,28 @@ def main() -> int:
             show_status(config)
             return 0
 
-        download_signed_certificate(config)
+        validate_username(config.username)
+        if config.public_key_path.suffix not in ('.pub', '.ppk'):
+            raise ValueError("Key path must end in .pub or .ppk")
+
+        log_key_info(config)
+        cert_info = check_existing_certificate(config)
+
+        if cert_info.error:
+            log_warning(f"Could not check existing certificate: {cert_info.error}", config)
+        elif cert_info.is_valid and not config.refresh:
+            log(f"Certificate {_format_cert_status(cert_info)}", config)
+            return 0
+        elif cert_info.is_valid and config.refresh:
+            log(f"Certificate {_format_cert_status(cert_info)}, refreshing anyway", config)
+
+        fingerprint = compute_key_fingerprint(config)
+        cert_data = authenticate_and_download(config, fingerprint)
+        write_certificate(config, cert_data)
+        maybe_add_to_ssh_agent(config)
+        create_cert_ppk(config)
+        maybe_load_into_pageant(config)
+        cleanup_intermediate_cert(config)
         return 0
     except KeyboardInterrupt:
         print("\nAborted.", file=sys.stderr)

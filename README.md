@@ -25,6 +25,11 @@ displayed. The user should follow the link and authenticate.
 Once authenticated, the signed certificate is downloaded and added to
 your SSH agent(s).
 
+The private key does not need to be present on the machine running the
+tool — signing only requires the public key. When the private key is
+missing, the certificate is still signed and written to disk, but
+ssh-agent integration and (on Windows) PPK creation are skipped.
+
 ## Linux & macOS
 
 ### Agent Mode
@@ -43,7 +48,7 @@ The `-a` option controls SSH agent handling:
 
 ### Requirements
 
-- `ssh-agent` must be running for agent integration
+- `ssh-agent` must be running for agent integration (only needed if the private key is present)
 - `ssh-keygen` must be available (for certificate inspection)
 
 ### Example
@@ -101,6 +106,12 @@ PuTTY, WinSCP, and other PuTTY-based tools.
 **Note:** PuTTY's own `puttygen.exe` does NOT support embedding
 certificates. WinSCP's `/keygen` command is required.
 
+### Skipping PPK Creation
+
+Use `-p` / `--no-ppk` to skip PPK file creation when starting from an
+OpenSSH public key. Useful if WinSCP is not installed or PPK output is
+not needed. This option is not valid with `.ppk` input.
+
 ### File Locations
 
 | File | Description |
@@ -119,6 +130,9 @@ csc_cert.py -u mmeikalainen -a pageant
 
 # OpenSSH agent only (skip Pageant/PPK)
 csc_cert.py -u mmeikalainen -a ssh
+
+# Skip PPK creation (e.g. when WinSCP is not installed)
+csc_cert.py -u mmeikalainen --no-ppk
 
 # With specific key
 csc_cert.py -u mmeikalainen C:\Users\mmeikalainen\.ssh\id_ed25519.pub
