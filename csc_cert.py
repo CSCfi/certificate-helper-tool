@@ -432,7 +432,8 @@ def create_ppk(winscp_path: str, private_key: Path, cert_path: Path, ppk_path: P
             f'/certificate={cert_path.as_posix()}',
         ],
         stdin=sys.stdin,
-        capture_output=True,
+        stdout=sys.stderr,
+        stderr=sys.stderr,
     )
     return result.returncode == 0
 
