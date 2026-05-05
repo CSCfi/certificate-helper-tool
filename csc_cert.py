@@ -11,17 +11,25 @@ Usage:
 
 from __future__ import annotations
 
+import os
+import sys
+
+# Re-exec under -I (isolated mode) so that user site-packages and PYTHONPATH
+# cannot shadow stdlib imports. `os` and `sys` are imported during interpreter
+# startup, so the two imports above cannot trigger user code; every other
+# import below runs after the re-exec under -I.
+if __name__ == '__main__' and not sys.flags.isolated:
+    os.execv(sys.executable, [sys.executable, '-I', *sys.argv])
+
 import argparse
 import base64
 import hashlib
 import json
-import os
 import platform
 import re
 import webbrowser
 import shutil
 import subprocess
-import sys
 import tempfile
 import urllib.request
 from dataclasses import dataclass
@@ -350,6 +358,9 @@ def add_key_to_ssh_agent(private_key_path: Path) -> bool:
 
     The adjacent certificate (-cert.pub) is automatically loaded by ssh-add.
     """
+    # Suppress GUI askpass helpers (x11-ssh-askpass etc.) so ssh-add reads any
+    # required passphrase from stdin. `env=` below applies to the child only;
+    # the parent process environment is unchanged.
     env = os.environ.copy()
     env['SSH_ASKPASS'] = ''
     env['SSH_ASKPASS_REQUIRE'] = 'never'
