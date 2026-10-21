@@ -1,0 +1,15 @@
+[project]
+name = "csc-cert"
+dynamic = ["version"]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+
+[tool.setuptools]
+py-modules = ["csc_cert"]
+
+[tool.setuptools.dynamic]
+version = {attr = "csc_cert.__version__"}
+
+[project.scripts]
+csc_cert = "csc_cert:main"
