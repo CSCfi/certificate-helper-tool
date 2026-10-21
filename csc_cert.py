@@ -30,7 +30,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, TextIO, Tuple
 from urllib.error import URLError, HTTPError
 
 __version__ = "1.0.0"
@@ -298,16 +298,57 @@ def open_browser(url: str) -> bool:
         return False
 
 
-def prompt_for_code() -> str:
-    """Prompt user for authentication code."""
+def open_controlling_terminal() -> Optional[Tuple[TextIO, TextIO]]:
+    """
+    Open the controlling terminal for interactive prompts.
+
+    Returns (reader, writer) text streams, or None if no controlling
+    terminal is available (e.g. fully headless execution).
+
+    This lets interactive prompts work even when stdin/stdout are
+    redirected, for example when invoked from an ssh config
+    'Match exec' directive, where stdin is not the user's terminal but
+    the controlling tty is still attached to the process.
+    """
+    if platform.system() == 'Windows':
+        read_name, write_name = 'CONIN$', 'CONOUT$'
+    else:
+        read_name = write_name = '/dev/tty'
+
+    reader: Optional[TextIO] = None
+    try:
+        reader = open(read_name, 'r')
+        writer = open(write_name, 'w')
+    except OSError:
+        if reader is not None:
+            reader.close()
+        return None
+    return reader, writer
+
+
+def stdin_is_interactive() -> bool:
+    """Return True if stdin is a usable interactive terminal."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, OSError):
+        return False
+
+
+def prompt_for_code(reader: TextIO, writer: TextIO) -> str:
+    """Prompt user for the 6-digit authentication code via the given streams."""
     while True:
-        print("Please enter the 6-digit code displayed in your browser to continue: ",
-              end='', file=sys.stderr, flush=True)
-        code = input().strip()
+        writer.write("Please enter the 6-digit code displayed in your browser to continue: ")
+        writer.flush()
+        line = reader.readline()
+        if line == '':
+            # EOF (e.g. Ctrl+D or an exhausted stream) returns '' rather than
+            # '\n', so bail out to avoid the loop re-prompting forever.
+            raise RuntimeError("Aborted: nothing was entered")
+        code = line.strip()
         if re.fullmatch(r'\d{6}', code):
             return code
-        print("Invalid input: code must be a 6-digit number, please retry.",
-              file=sys.stderr)
+        writer.write("Invalid input: code must be a 6-digit number, please retry.\n")
+        writer.flush()
 
 
 def download_certificate(url: str, timeout: int = 30) -> dict:
@@ -705,13 +746,32 @@ def authenticate_and_download(config: Config, fingerprint: str) -> str:
     payload = create_payload(fingerprint, config.username)
     login_url = f"{BASE_URL}/login?certSign={payload}&sshCli=true"
 
-    print("Please log in to sign the public key:", file=sys.stderr)
-    print(file=sys.stderr)
-    print(login_url, file=sys.stderr)
-    print(file=sys.stderr)
+    # Prefer standard streams when stdin is an interactive terminal. Only when
+    # stdin is not a terminal (e.g. under an ssh config 'Match exec')
+    # fall back to the controlling terminal directly, so the prompt still works.
+    if stdin_is_interactive():
+        tty = None
+        reader, writer = sys.stdin, sys.stderr
+    else:
+        tty = open_controlling_terminal()
+        if tty is None:
+            raise RuntimeError(
+                "No interactive terminal available to read the 6-digit code. "
+                "Run the tool from an interactive terminal to complete authentication."
+            )
+        reader, writer = tty
 
-    open_browser(login_url)
-    code = prompt_for_code()
+    try:
+        writer.write("Please log in to sign the public key:\n\n")
+        writer.write(f"{login_url}\n\n")
+        writer.flush()
+
+        open_browser(login_url)
+        code = prompt_for_code(reader, writer)
+    finally:
+        if tty is not None:
+            reader.close()
+            writer.close()
 
     download_url = f"{BASE_URL}/api/certificate/download/{payload}?code={code}"
     response = download_certificate(download_url)
